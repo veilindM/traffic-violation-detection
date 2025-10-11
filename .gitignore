@@ -1,0 +1,23 @@
+# Virtual environment
+venv/
+
+# Cache and temporary files
+__pycache__/
+*.pyc
+*.pyo
+
+# Output videos and violation logs
+violations/
+*.mp4
+*.jpg
+*.csv
+
+# Model weights (too large for GitHub)
+*.pt
+
+# Streamlit cache
+.streamlit/
+
+# Jupyter / Colab
+.ipynb_checkpoints/
+*.ipynb
