@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+streamlit
+torch>=2.0.0
+torchvision
+opencv-python
+pandas
+numpy
+requests
+easyocr
+gitpython
+matplotlib
+seaborn
+pyyaml
+tqdm
