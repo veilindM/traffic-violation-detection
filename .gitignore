@@ -21,3 +21,5 @@ violations/
 # Jupyter / Colab
 .ipynb_checkpoints/
 *.ipynb
+
+firebase_key.json
