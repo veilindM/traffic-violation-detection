@@ -13,3 +13,6 @@ matplotlib
 seaborn
 pyyaml
 tqdm
+ipython
+psutil
+python-multipart
