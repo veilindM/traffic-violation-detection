@@ -15,10 +15,21 @@ from models.yolo import DetectionModel
 from utils.torch_utils import select_device
 from utils.augmentations import letterbox
 from utils.general import non_max_suppression, scale_boxes
+from firebase_utils import upload_violation_image
 
-# --- Fix for PyTorch 2.6+ weights loading ---
-torch.serialization.add_safe_globals([DetectionModel])
 
+from torch.serialization import add_safe_globals
+from torch.nn.modules.container import Sequential
+
+add_safe_globals([Sequential, DetectionModel])
+
+# Monkey-patch torch.load to force weights_only=False
+_real_torch_load = torch.load
+def patched_torch_load(*args, **kwargs):
+    if "weights_only" not in kwargs:
+        kwargs["weights_only"] = False
+    return _real_torch_load(*args, **kwargs)
+torch.load = patched_torch_load
 # --- OCR setup ---
 reader = easyocr.Reader(['en'])
 
@@ -132,7 +143,7 @@ def process_video(video_path, weights="yolov9-c.pt", conf_thres=0.25, iou_thres=
                                 remote_url = None
                                 if save_to_storage_fn:
                                     try:
-                                        remote_url = save_to_storage_fn(save_path)
+                                        remote_url = upload_violation_image(save_path, plate_number_clean, frame_no)
                                     except Exception as e:
                                         print("Error uploading:", e)
                                         remote_url = None

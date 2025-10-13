@@ -21,3 +21,8 @@ async def upload_video(file: UploadFile = File(...)):
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+    
+@app.get("/violations")
+def get_violations():
+    docs = db.collection("violations").stream()
+    return [doc.to_dict() for doc in docs]
