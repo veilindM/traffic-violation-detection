@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 import os
 import shutil
 from deteksi import process_video
+from firebase_utils import db
 
 app = FastAPI(title="Traffic Violation Detection API")
 
