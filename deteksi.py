@@ -139,14 +139,12 @@ def process_video(video_path, weights="yolov9-c.pt", conf_thres=0.25, iou_thres=
                                 cv2.imwrite(save_path, crop_img)
                                 log_violation(frame_no, plate_number_clean, save_path)
                                 logged_plates.add(plate_number_clean)
-
-                                remote_url = None
-                                if save_to_storage_fn:
-                                    try:
-                                        remote_url = upload_violation_image(save_path, plate_number_clean, frame_no)
-                                    except Exception as e:
-                                        print("Error uploading:", e)
-                                        remote_url = None
+                             
+                                try:
+                                    remote_url = upload_violation_image(save_path, plate_number_clean, frame_no)
+                                except Exception as e:
+                                    print("Error uploading:", e)
+                                    remote_url = None
 
                                 results_list.append({
                                     "frame": frame_no,
