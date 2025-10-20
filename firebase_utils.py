@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 
 FIREBASE_KEY_PATH = "firebase_key.json"  # path to the JSON you downloaded
-BUCKET_NAME = "traffic-violation-app-a5c5c.appspot.com"  # replace with your actual bucket
+BUCKET_NAME = "traffic-violation-app-a5c5c.firebasestorage.app"  # replace with your actual bucket
 
 # Initialize Firebase app once
 if not firebase_admin._apps:
