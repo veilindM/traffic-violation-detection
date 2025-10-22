@@ -60,16 +60,113 @@ def is_left_turn_region(x, y, frame_w, frame_h):
     return (x < frame_w * 0.25) and (y > frame_h * 0.7)
 
 def preprocess_plate_image(img):
+    """
+    Enhanced preprocessing for better OCR accuracy
+    This fixes the DUMUFK → BJI7TFK issue
+    """
+    # Convert to grayscale
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    return clahe.apply(gray)
+    
+    # Resize to standard height for better OCR
+    height = 100
+    if gray.shape[0] > 0:
+        ratio = height / gray.shape[0]
+        width = int(gray.shape[1] * ratio)
+        resized = cv2.resize(gray, (width, height), interpolation=cv2.INTER_CUBIC)
+    else:
+        resized = gray
+    
+    # Apply CLAHE with stronger parameters
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(resized)
+    
+    # Denoise to remove noise that confuses OCR
+    denoised = cv2.fastNlMeansDenoising(enhanced, None, 10, 7, 21)
+    
+    # Sharpen the image to make text clearer
+    kernel = np.array([[-1, -1, -1],
+                       [-1,  9, -1],
+                       [-1, -1, -1]])
+    sharpened = cv2.filter2D(denoised, -1, kernel)
+    
+    # Apply adaptive threshold for better text separation
+    binary = cv2.adaptiveThreshold(
+        sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY, 11, 2
+    )
+    
+    return binary
 
 def detect_plate_number_ocr(img):
-    results = reader.readtext(img)
-    if len(results) > 0:
-        text = results[0][1].replace(" ", "").upper()
-        return "".join(c for c in text if c.isalnum())
-    return "UNKNOWN"
+    """
+    Enhanced OCR with multiple preprocessing attempts
+    Tries different preprocessing methods and picks the best result
+    """
+    # Prepare multiple preprocessing versions
+    versions = []
+    
+    # Version 1: Original grayscale
+    if img.ndim == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img.copy()
+    versions.append(('original', gray))
+    
+    # Version 2: Enhanced version (from preprocess_plate_image)
+    try:
+        enhanced = preprocess_plate_image(img)
+        versions.append(('enhanced', enhanced))
+    except:
+        pass
+    
+    # Version 3: Otsu threshold
+    try:
+        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        versions.append(('otsu', otsu))
+    except:
+        pass
+    
+    # Version 4: Inverted binary (for dark plates on light background)
+    try:
+        _, inv_binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        versions.append(('inverted', inv_binary))
+    except:
+        pass
+    
+    best_text = "UNKNOWN"
+    best_confidence = 0
+    best_version = "none"
+    
+    # Try OCR on all versions, pick the best result
+    for version_name, version_img in versions:
+        try:
+            results = reader.readtext(
+                version_img,
+                detail=1,
+                paragraph=False,
+                allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+            )
+            
+            if len(results) > 0:
+                # Get text and confidence
+                text = results[0][1].replace(" ", "").upper()
+                text = "".join(c for c in text if c.isalnum())
+                conf = results[0][2]
+                
+                # Update if this is better (higher confidence and reasonable length)
+                if conf > best_confidence and len(text) >= 4:  # At least 4 characters
+                    best_text = text
+                    best_confidence = conf
+                    best_version = version_name
+                    
+        except Exception as e:
+            continue
+    
+    # Debug output (optional - comment out if too verbose)
+    if best_text != "UNKNOWN":
+        print(f"  [OCR] Best: '{best_text}' (conf: {best_confidence:.2f}, method: {best_version})")
+    
+    return best_text
 
 def is_same_vehicle(cx, cy, tracked_vehicles, threshold=60):
     for (tx, ty) in tracked_vehicles:
@@ -102,12 +199,19 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
     logged_plates.clear()
     tracked_vehicles.clear()
 
+    print(f"\n🚀 Starting video processing...")
+    print(f"   Video: {video_path}")
+    print(f"   Vehicle model: {vehicle_weights}")
+    print(f"   Plate model: {plate_weights}")
+    print(f"   Output: {out_path}\n")
+
     while True:
         ret, im0 = vid_cap.read()
         if not ret:
             break
         frame_no += 1
 
+        # Vehicle detection
         im_vehicle = letterbox(im0, 640, stride=vehicle_stride, auto=True)[0]
         im_vehicle = im_vehicle[:, :, ::-1].transpose(2, 0, 1).copy()
         im_vehicle = torch.from_numpy(im_vehicle).to(device).float() / 255.0
@@ -135,7 +239,7 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
                     if crop_vehicle.size == 0:
                         continue
 
-                    # Detect plate
+                    # Plate detection
                     im_plate = letterbox(crop_vehicle, 640, stride=plate_stride, auto=True)[0]
                     im_plate = im_plate[:, :, ::-1].transpose(2, 0, 1).copy()
                     im_plate = torch.from_numpy(im_plate).to(device).float() / 255.0
@@ -151,9 +255,10 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
                         det_plate[:, :4] = scale_boxes(im_plate.shape[2:], det_plate[:, :4], crop_vehicle.shape).round()
                         x1p, y1p, x2p, y2p = map(int, det_plate[0][:4])
                         crop_plate = crop_vehicle[y1p:y2p, x1p:x2p]
+                        
                         if crop_plate.size > 0:
-                            preprocessed = preprocess_plate_image(crop_plate)
-                            plate_number = detect_plate_number_ocr(preprocessed)
+                            # Use enhanced OCR
+                            plate_number = detect_plate_number_ocr(crop_plate)
 
                     # Save violation
                     if plate_number != "UNKNOWN" and plate_number not in logged_plates:
@@ -175,7 +280,7 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
                             try:
                                 remote_url = save_to_storage_fn(save_path, plate_number, frame_no)
                             except Exception as e:
-                                print("Error uploading:", e)
+                                print("⚠️ Error uploading:", e)
 
                         results_list.append({
                             "frame": frame_no,
@@ -184,13 +289,24 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
                             "remote_url": remote_url
                         })
 
+                    # Draw on video frame
                     cv2.rectangle(im0, (x1, y1), (x2, y2), (0,0,255), 2)
                     cv2.putText(im0, f"VIOLATION: {plate_number}", (x1, y1 - 10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
 
         out_video.write(im0)
+        
+        # Progress indicator every 30 frames
+        if frame_no % 30 == 0:
+            print(f"  Processing frame {frame_no}... ({len(logged_plates)} violations found)")
 
     vid_cap.release()
     out_video.release()
-    print(f"✅ Output video saved: {out_path}")
+    
+    print(f"\n✅ Processing complete!")
+    print(f"   Total frames: {frame_no}")
+    print(f"   Violations detected: {len(results_list)}")
+    print(f"   Output video: {out_path}")
+    print(f"   CSV log: {LOG_PATH}\n")
+    
     return {"output_video": out_path, "violations": results_list}
