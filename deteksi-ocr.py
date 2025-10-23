@@ -3,14 +3,13 @@ import torch
 import os
 import pandas as pd
 import numpy as np
+import easyocr
 import uuid
 from datetime import datetime
 import sys, os
 import torch
 from torch.serialization import add_safe_globals
 from torch.nn.modules.container import Sequential
-import base64
-import google.generativeai as genai
 
 # Fix PyTorch 2.6+ weight loading restriction
 try:
@@ -35,11 +34,8 @@ from utils.augmentations import letterbox
 from utils.general import non_max_suppression, scale_boxes
 from firebase_utils import upload_violation_image
 
-# --- Configure Gemini ---
-# Set your API key here or use environment variable
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAUlbhxc6X9ReiSk9y_oWOEv_b_dprBOnM")
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+# --- OCR ---
+reader = easyocr.Reader(['en'])
 
 SAVE_DIR = "violations"
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -63,69 +59,114 @@ def log_violation(frame_no, plate_number, crop_img_path):
 def is_left_turn_region(x, y, frame_w, frame_h):
     return (x < frame_w * 0.25) and (y > frame_h * 0.7)
 
-def detect_plate_number_gemini(img):
+def preprocess_plate_image(img):
     """
-    Use Gemini Vision AI to read license plate
-    Much more accurate than OCR!
+    Enhanced preprocessing for better OCR accuracy
+    This fixes the DUMUFK → BJI7TFK issue
     """
-    try:
-        # Convert image to base64 for Gemini
-        _, buffer = cv2.imencode('.jpg', img)
-        image_base64 = base64.b64encode(buffer).decode('utf-8')
-        
-        # Create prompt for Gemini
-        prompt = """
-        Look at this image and read ONLY the license plate number.
-        
-        Rules:
-        1. Return ONLY the alphanumeric characters you see on the plate
-        2. Remove all spaces
-        3. Convert to uppercase
-        4. If you cannot read it clearly, return "UNKNOWN"
-        5. Do not include any explanation, just the plate number
-        
-        Example responses:
-        - BJI7TFK (correct)
-        - B1234CD (correct)
-        - UNKNOWN (if not readable)
-        
-        What is the license plate number?
-        """
-        
-        # Call Gemini API
-        response = gemini_model.generate_content([
-            prompt,
-            {
-                "mime_type": "image/jpeg",
-                "data": image_base64
-            }
-        ])
-        
-        # Extract and clean the response
-        plate_text = response.text.strip().upper()
-        plate_text = "".join(c for c in plate_text if c.isalnum())
-        
-        # Validate the response
-        if len(plate_text) < 4 or len(plate_text) > 15:
-            print(f"  [GEMINI] Invalid length: '{plate_text}'")
-            return "UNKNOWN"
-        
-        print(f"  [GEMINI] Detected: '{plate_text}'")
-        return plate_text
-        
-    except Exception as e:
-        print(f"  [GEMINI] Error: {str(e)}")
-        return "UNKNOWN"
+    # Convert to grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    
+    # Resize to standard height for better OCR
+    height = 100
+    if gray.shape[0] > 0:
+        ratio = height / gray.shape[0]
+        width = int(gray.shape[1] * ratio)
+        resized = cv2.resize(gray, (width, height), interpolation=cv2.INTER_CUBIC)
+    else:
+        resized = gray
+    
+    # Apply CLAHE with stronger parameters
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(resized)
+    
+    # Denoise to remove noise that confuses OCR
+    denoised = cv2.fastNlMeansDenoising(enhanced, None, 10, 7, 21)
+    
+    # Sharpen the image to make text clearer
+    kernel = np.array([[-1, -1, -1],
+                       [-1,  9, -1],
+                       [-1, -1, -1]])
+    sharpened = cv2.filter2D(denoised, -1, kernel)
+    
+    # Apply adaptive threshold for better text separation
+    binary = cv2.adaptiveThreshold(
+        sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY, 11, 2
+    )
+    
+    return binary
 
-def detect_plate_number_gemini_batch(images):
+def detect_plate_number_ocr(img):
     """
-    Process multiple plate images at once (more efficient)
+    Enhanced OCR with multiple preprocessing attempts
+    Tries different preprocessing methods and picks the best result
     """
-    results = []
-    for img in images:
-        result = detect_plate_number_gemini(img)
-        results.append(result)
-    return results
+    # Prepare multiple preprocessing versions
+    versions = []
+    
+    # Version 1: Original grayscale
+    if img.ndim == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img.copy()
+    versions.append(('original', gray))
+    
+    # Version 2: Enhanced version (from preprocess_plate_image)
+    try:
+        enhanced = preprocess_plate_image(img)
+        versions.append(('enhanced', enhanced))
+    except:
+        pass
+    
+    # Version 3: Otsu threshold
+    try:
+        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        versions.append(('otsu', otsu))
+    except:
+        pass
+    
+    # Version 4: Inverted binary (for dark plates on light background)
+    try:
+        _, inv_binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        versions.append(('inverted', inv_binary))
+    except:
+        pass
+    
+    best_text = "UNKNOWN"
+    best_confidence = 0
+    best_version = "none"
+    
+    # Try OCR on all versions, pick the best result
+    for version_name, version_img in versions:
+        try:
+            results = reader.readtext(
+                version_img,
+                detail=1,
+                paragraph=False,
+                allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+            )
+            
+            if len(results) > 0:
+                # Get text and confidence
+                text = results[0][1].replace(" ", "").upper()
+                text = "".join(c for c in text if c.isalnum())
+                conf = results[0][2]
+                
+                # Update if this is better (higher confidence and reasonable length)
+                if conf > best_confidence and len(text) >= 4:  # At least 4 characters
+                    best_text = text
+                    best_confidence = conf
+                    best_version = version_name
+                    
+        except Exception as e:
+            continue
+    
+    # Debug output (optional - comment out if too verbose)
+    if best_text != "UNKNOWN":
+        print(f"  [OCR] Best: '{best_text}' (conf: {best_confidence:.2f}, method: {best_version})")
+    
+    return best_text
 
 def is_same_vehicle(cx, cy, tracked_vehicles, threshold=60):
     for (tx, ty) in tracked_vehicles:
@@ -136,15 +177,8 @@ def is_same_vehicle(cx, cy, tracked_vehicles, threshold=60):
 
 # --- Main function ---
 def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best.pt",
-                  conf_thres=0.25, iou_thres=0.45, save_dir=SAVE_DIR, 
-                  save_to_storage_fn=upload_violation_image, use_gemini=True):
-    """
-    Process video with option to use Gemini or traditional OCR
-    
-    Args:
-        use_gemini (bool): If True, use Gemini Vision AI. If False, use EasyOCR
-    """
-    
+                  conf_thres=0.25, iou_thres=0.45, save_dir=SAVE_DIR, save_to_storage_fn=upload_violation_image):
+
     device = select_device("")
     vehicle_model = DetectMultiBackend(vehicle_weights, device=device, dnn=False, fp16=False)
     vehicle_stride, vehicle_names = vehicle_model.stride, vehicle_model.names
@@ -169,7 +203,6 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
     print(f"   Video: {video_path}")
     print(f"   Vehicle model: {vehicle_weights}")
     print(f"   Plate model: {plate_weights}")
-    print(f"   OCR Method: {'Gemini Vision AI ✨' if use_gemini else 'EasyOCR'}")
     print(f"   Output: {out_path}\n")
 
     while True:
@@ -224,12 +257,8 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
                         crop_plate = crop_vehicle[y1p:y2p, x1p:x2p]
                         
                         if crop_plate.size > 0:
-                            # Use Gemini Vision AI
-                            if use_gemini:
-                                plate_number = detect_plate_number_gemini(crop_plate)
-                            else:
-                                # Fallback to traditional OCR (you can add EasyOCR here if needed)
-                                plate_number = "UNKNOWN"
+                            # Use enhanced OCR
+                            plate_number = detect_plate_number_ocr(crop_plate)
 
                     # Save violation
                     if plate_number != "UNKNOWN" and plate_number not in logged_plates:

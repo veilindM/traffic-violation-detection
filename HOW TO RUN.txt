@@ -1,3 +1,6 @@
 venv : python -m venv venv (create), venv\Scripts\activate (activate)
 frontend : streamlit run streamlit_app.py
 backend : uvicorn app:app --reload
+
+add-on:
+gemini api key : AIzaSyAUlbhxc6X9ReiSk9y_oWOEv_b_dprBOnM
