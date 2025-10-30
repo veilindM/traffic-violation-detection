@@ -23,3 +23,6 @@ violations/
 *.ipynb
 
 firebase_key.json
+
+#Dataset
+dataset/
