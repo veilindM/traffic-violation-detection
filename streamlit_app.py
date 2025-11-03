@@ -1,8 +1,8 @@
 import streamlit as st
 import requests
 
-st.set_page_config(page_title="Traffic Violation Detection", layout="wide")
-st.title("🚦 Traffic Light Violation Detection")
+st.set_page_config(page_title="Vehicle and Plate Number Detection", layout="wide")
+st.title("🚦 Vehicle and Plate Number Detection")
 
 backend_url = st.text_input("Backend URL", "http://127.0.0.1:8000")
 uploaded_file = st.file_uploader("Upload traffic video", type=["mp4", "avi", "mov"])
