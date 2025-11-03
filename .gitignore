@@ -18,9 +18,6 @@ violations/
 # Streamlit cache
 .streamlit/
 
-# Jupyter / Colab
-.ipynb_checkpoints/
-*.ipynb
 
 firebase_key.json
 
