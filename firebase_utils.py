@@ -3,15 +3,13 @@ import firebase_admin
 from firebase_admin import credentials, storage, firestore
 import os
 from datetime import datetime
-
-FIREBASE_KEY_PATH = "firebase_key.json"  
-BUCKET_NAME = "traffic-violation-app-a5c5c.firebasestorage.app" 
+from config import FIREBASE_KEY_PATH, FIREBASE_BUCKET
 
 # Initialize Firebase app once
 if not firebase_admin._apps:
     cred = credentials.Certificate(FIREBASE_KEY_PATH)
     firebase_admin.initialize_app(cred, {
-        "storageBucket": BUCKET_NAME
+        "storageBucket": FIREBASE_BUCKET
     })
 
 db = firestore.client()
@@ -31,7 +29,7 @@ def upload_violation_image(local_path, plate_number, frame_no):
         blob.make_public()
         url = blob.public_url
     except Exception:
-        url = f"gs://{BUCKET_NAME}/{blob_name}"
+        url = f"gs://{FIREBASE_BUCKET}/{blob_name}"
 
     # store metadata in Firestore
     doc = {

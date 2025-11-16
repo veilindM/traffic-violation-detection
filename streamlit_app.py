@@ -1,9 +1,12 @@
 import streamlit as st
 import requests
+from config import BACKEND_PORT
+import os
 
 st.set_page_config(page_title="Vehicle and Plate Number Detection", layout="wide")
 st.title("🚦 Vehicle and Plate Number Detection")
 
+default_backend = os.getenv("BACKEND_URL", f"http://127.0.0.1:8000")
 backend_url = st.text_input("Backend URL", "http://127.0.0.1:8000")
 uploaded_file = st.file_uploader("Upload traffic video", type=["mp4", "avi", "mov"])
 

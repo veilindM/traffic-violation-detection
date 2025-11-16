@@ -1,25 +1,30 @@
+# deteksi.py
+import os
+import sys
+import base64
+import uuid
 import cv2
 import torch
-import os
-import pandas as pd
 import numpy as np
-import uuid
+import pandas as pd
 from datetime import datetime
-import sys, os
-import torch
 from torch.serialization import add_safe_globals
 from torch.nn.modules.container import Sequential
-import base64
-import google.generativeai as genai
 
-# Fix PyTorch 2.6+ weight loading restriction
+# Ensure yolov9 local repo is available on path (if you clone it locally)
+sys.path.append(os.path.join(os.getcwd(), "yolov9"))
+
+# Config (centralized)
+from config import MODEL_VEHICLE, MODEL_PLATE, GEMINI_API_KEY, SAVE_DIR
+
+# PyTorch safe globals patch for custom model classes (keep this)
 try:
     from models.yolo import DetectionModel
     add_safe_globals([DetectionModel, Sequential])
 except Exception as e:
     print("⚠️ Warning: Could not register DetectionModel as safe global:", e)
 
-# Monkey-patch torch.load to always allow weights_only=False
+# Monkey-patch torch.load to allow weights_only=False (older checkpoints)
 _real_torch_load = torch.load
 def patched_torch_load(*args, **kwargs):
     if "weights_only" not in kwargs:
@@ -27,35 +32,48 @@ def patched_torch_load(*args, **kwargs):
     return _real_torch_load(*args, **kwargs)
 torch.load = patched_torch_load
 
-sys.path.append(os.path.join(os.getcwd(), "yolov9"))
-
+# YOLOv9 imports (local repo expected)
 from models.common import DetectMultiBackend
 from utils.torch_utils import select_device
 from utils.augmentations import letterbox
 from utils.general import non_max_suppression, scale_boxes
+
+# Firebase uploader (your existing helper)
 from firebase_utils import upload_violation_image
 
-# --- Configure Gemini ---
-# Set your API key here or use environment variable
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAUlbhxc6X9ReiSk9y_oWOEv_b_dprBOnM")
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+# Optional Gemini import & init (only if key is set)
+gemini_available = False
+try:
+    if GEMINI_API_KEY:
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+        gemini_available = True
+    else:
+        print("⚠️ GEMINI_API_KEY not set. Gemini disabled — will fallback to alternative OCR if available.")
+except Exception as e:
+    gemini_available = False
+    print("⚠️ Could not initialize Gemini (google.generativeai). Exception:", e)
 
-SAVE_DIR = "violations"
+# Prepare save directory and CSV log
 os.makedirs(SAVE_DIR, exist_ok=True)
-
 LOG_PATH = os.path.join(SAVE_DIR, "violations.csv")
 if not os.path.exists(LOG_PATH):
-    df = pd.DataFrame(columns=["frame", "plate_number", "filename"])
+    df = pd.DataFrame(columns=["frame", "plate_number", "filename", "timestamp"])
     df.to_csv(LOG_PATH, index=False)
 
 logged_plates = set()
 tracked_vehicles = []
 
-# --- Helper functions ---
+# ---------------- Helper functions ----------------
 def log_violation(frame_no, plate_number, crop_img_path):
     df = pd.read_csv(LOG_PATH)
-    new_entry = {"frame": frame_no, "plate_number": plate_number, "filename": crop_img_path}
+    new_entry = {
+        "frame": frame_no,
+        "plate_number": plate_number,
+        "filename": crop_img_path,
+        "timestamp": datetime.utcnow()
+    }
     df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
     df.to_csv(LOG_PATH, index=False)
     print(f"[VIOLATION] Frame {frame_no}, Plate: {plate_number}, Saved: {crop_img_path}")
@@ -65,67 +83,46 @@ def is_left_turn_region(x, y, frame_w, frame_h):
 
 def detect_plate_number_gemini(img):
     """
-    Use Gemini Vision AI to read license plate
-    Much more accurate than OCR!
+    Use Gemini Vision AI to read license plate.
+    Returns plate string or 'UNKNOWN'.
     """
+    if not gemini_available:
+        return "UNKNOWN"
     try:
-        # Convert image to base64 for Gemini
+        # encode image as base64
         _, buffer = cv2.imencode('.jpg', img)
         image_base64 = base64.b64encode(buffer).decode('utf-8')
-        
-        # Create prompt for Gemini
+
         prompt = """
-        Look at this image and read ONLY the license plate number.
-        
-        Rules:
-        1. Return ONLY the alphanumeric characters you see on the plate
-        2. Remove all spaces
-        3. Convert to uppercase
-        4. If you cannot read it clearly, return "UNKNOWN"
-        5. Do not include any explanation, just the plate number
-        
-        Example responses:
-        - BJI7TFK (correct)
-        - B1234CD (correct)
-        - UNKNOWN (if not readable)
-        
-        What is the license plate number?
-        """
-        
-        # Call Gemini API
+Look at this image and read ONLY the license plate number.
+
+Rules:
+1. Return ONLY the alphanumeric characters you see on the plate
+2. Remove all spaces
+3. Convert to uppercase
+4. If you cannot read it clearly, return "UNKNOWN"
+5. Do not include any explanation, just the plate number
+
+What is the license plate number?
+"""
         response = gemini_model.generate_content([
             prompt,
-            {
-                "mime_type": "image/jpeg",
-                "data": image_base64
-            }
+            {"mime_type": "image/jpeg", "data": image_base64}
         ])
-        
-        # Extract and clean the response
-        plate_text = response.text.strip().upper()
+        # response.text may vary depending on SDK; handle safely
+        plate_text = (getattr(response, "text", "") or str(response)).strip().upper()
         plate_text = "".join(c for c in plate_text if c.isalnum())
-        
-        # Validate the response
+
         if len(plate_text) < 4 or len(plate_text) > 15:
             print(f"  [GEMINI] Invalid length: '{plate_text}'")
             return "UNKNOWN"
-        
+
         print(f"  [GEMINI] Detected: '{plate_text}'")
         return plate_text
-        
-    except Exception as e:
-        print(f"  [GEMINI] Error: {str(e)}")
-        return "UNKNOWN"
 
-def detect_plate_number_gemini_batch(images):
-    """
-    Process multiple plate images at once (more efficient)
-    """
-    results = []
-    for img in images:
-        result = detect_plate_number_gemini(img)
-        results.append(result)
-    return results
+    except Exception as e:
+        print(f"  [GEMINI] Error: {e}")
+        return "UNKNOWN"
 
 def is_same_vehicle(cx, cy, tracked_vehicles, threshold=60):
     for (tx, ty) in tracked_vehicles:
@@ -133,19 +130,19 @@ def is_same_vehicle(cx, cy, tracked_vehicles, threshold=60):
             return True
     return False
 
-
-# --- Main function ---
-def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best.pt",
-                  conf_thres=0.25, iou_thres=0.45, save_dir=SAVE_DIR, 
-                  save_to_storage_fn=upload_violation_image, use_gemini=True):
+# ---------------- Main processing ----------------
+def process_video(video_path,
+                  vehicle_weights=MODEL_VEHICLE,
+                  plate_weights=MODEL_PLATE,
+                  conf_thres=0.25,
+                  iou_thres=0.45,
+                  save_dir=SAVE_DIR,
+                  save_to_storage_fn=upload_violation_image,
+                  use_gemini=True):
     """
-    Process video with option to use Gemini or traditional OCR
-    
-    Args:
-        use_gemini (bool): If True, use Gemini Vision AI. If False, use EasyOCR
+    Process the video and detect violations.
     """
-    
-    device = select_device("")
+    device = select_device("")  # CPU by default or CUDA if available
     vehicle_model = DetectMultiBackend(vehicle_weights, device=device, dnn=False, fp16=False)
     vehicle_stride, vehicle_names = vehicle_model.stride, vehicle_model.names
 
@@ -153,10 +150,14 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
     plate_stride, plate_names = plate_model.stride, plate_model.names
 
     vid_cap = cv2.VideoCapture(video_path)
+    if not vid_cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     fps = int(vid_cap.get(cv2.CAP_PROP_FPS)) or 25
-    width = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    width = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    height = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+
     out_path = os.path.join(save_dir, f"output_{uuid.uuid4().hex[:8]}.mp4")
     out_video = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
 
@@ -169,7 +170,7 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
     print(f"   Video: {video_path}")
     print(f"   Vehicle model: {vehicle_weights}")
     print(f"   Plate model: {plate_weights}")
-    print(f"   OCR Method: {'Gemini Vision AI ✨' if use_gemini else 'EasyOCR'}")
+    print(f"   OCR Method: {'Gemini' if use_gemini and gemini_available else 'Fallback/OCR disabled'}")
     print(f"   Output: {out_path}\n")
 
     while True:
@@ -206,12 +207,13 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
                     if crop_vehicle.size == 0:
                         continue
 
-                    # Plate detection
+                    # Plate detection (run plate model inside vehicle crop)
                     im_plate = letterbox(crop_vehicle, 640, stride=plate_stride, auto=True)[0]
                     im_plate = im_plate[:, :, ::-1].transpose(2, 0, 1).copy()
                     im_plate = torch.from_numpy(im_plate).to(device).float() / 255.0
                     if im_plate.ndimension() == 3:
                         im_plate = im_plate.unsqueeze(0)
+
                     pred_plate = plate_model(im_plate, augment=False, visualize=False)
                     pred_plate = pred_plate[0] if isinstance(pred_plate, list) else pred_plate
                     pred_plate = non_max_suppression(pred_plate, conf_thres, iou_thres, max_det=1)
@@ -222,16 +224,15 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
                         det_plate[:, :4] = scale_boxes(im_plate.shape[2:], det_plate[:, :4], crop_vehicle.shape).round()
                         x1p, y1p, x2p, y2p = map(int, det_plate[0][:4])
                         crop_plate = crop_vehicle[y1p:y2p, x1p:x2p]
-                        
+
                         if crop_plate.size > 0:
-                            # Use Gemini Vision AI
-                            if use_gemini:
+                            if use_gemini and gemini_available:
                                 plate_number = detect_plate_number_gemini(crop_plate)
                             else:
-                                # Fallback to traditional OCR (you can add EasyOCR here if needed)
+                                # You can add EasyOCR fallback here (if installed)
                                 plate_number = "UNKNOWN"
 
-                    # Save violation
+                    # Save violation if unique
                     if plate_number != "UNKNOWN" and plate_number not in logged_plates:
                         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                         proof = crop_vehicle.copy()
@@ -260,24 +261,23 @@ def process_video(video_path, vehicle_weights="yolov9-c.pt", plate_weights="best
                             "remote_url": remote_url
                         })
 
-                    # Draw on video frame
+                    # Visualize detection
                     cv2.rectangle(im0, (x1, y1), (x2, y2), (0,0,255), 2)
                     cv2.putText(im0, f"VIOLATION: {plate_number}", (x1, y1 - 10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
 
         out_video.write(im0)
-        
-        # Progress indicator every 30 frames
+
         if frame_no % 30 == 0:
             print(f"  Processing frame {frame_no}... ({len(logged_plates)} violations found)")
 
     vid_cap.release()
     out_video.release()
-    
+
     print(f"\n✅ Processing complete!")
     print(f"   Total frames: {frame_no}")
     print(f"   Violations detected: {len(results_list)}")
     print(f"   Output video: {out_path}")
     print(f"   CSV log: {LOG_PATH}\n")
-    
+
     return {"output_video": out_path, "violations": results_list}

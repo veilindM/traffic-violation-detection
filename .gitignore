@@ -20,6 +20,7 @@ violations/
 
 
 firebase_key.json
+.env
 
 #Dataset
 dataset/

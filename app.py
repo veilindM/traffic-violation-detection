@@ -4,10 +4,11 @@ import os
 import shutil
 from deteksi import process_video
 from firebase_utils import db
+from config import UPLOAD_DIR
 
 app = FastAPI(title="Traffic Violation Detection API")
 
-UPLOAD_DIR = "uploads"
+UPLOAD_DIR = UPLOAD_DIR
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.post("/upload")

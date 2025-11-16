@@ -16,3 +16,4 @@ tqdm
 ipython
 psutil
 python-multipart
+python-dotenv
