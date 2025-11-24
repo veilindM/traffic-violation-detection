@@ -2,8 +2,7 @@ Aplikasi Pendeteksi Plat Mobil di Jalan
 
 Aplikasi pendeteksi plat mobil ini bekerja dengan cara mendeteksi mobil di jalan dan menangkap foto dari plat mobil kemudian plat yang sudah ter-record akan disimpan di database. Model yang digunakan untuk mendeteksi mobil dan plat mobil adalah library yolov9. Model ini kemudian dilakukan training kembali dengan dataset yang diambil dari kaggle. Untuk membaca no plat, model Gemini yang digunakan adalah gemini-2.5-flash.
 
-Folder dataset : dataset/ 
-(Tidak di push di github dikarenakan jumlah file besar)
+File Lengkap : https://mikroskilacid-my.sharepoint.com/:f:/g/personal/221111085_students_mikroskil_ac_id/ErwEoFOd21pDp6xZWLB9IWgBM7VvJFoV6E2vF4F3XC03GA?e=aMPaW1
 
 Cara kerja:
 1. Pull repository github ke local (VS Code)
