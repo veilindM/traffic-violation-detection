@@ -277,8 +277,8 @@ vehicle_stats = VehicleStatistics()
 # ENHANCED LOGGING
 # ============================================================================
 
-def log_violation(frame_no, plate_number, crop_img_path, vehicle_type="UNKNOWN", vehicle_color="UNKNOWN"):
-    """Enhanced log with vehicle type and color"""
+def log_detection(frame_no, plate_number, crop_img_path, vehicle_type="UNKNOWN", vehicle_color="UNKNOWN"):
+    """Enhanced log with vehicle type and color - renamed from log_violation to log_detection"""
     df = pd.read_csv(LOG_PATH)
     new_entry = {
         "frame": frame_no,
@@ -290,7 +290,12 @@ def log_violation(frame_no, plate_number, crop_img_path, vehicle_type="UNKNOWN",
     }
     df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
     df.to_csv(LOG_PATH, index=False)
-    print(f"[VIOLATION] Frame {frame_no}, Plate: {plate_number}, Type: {vehicle_type}, Color: {vehicle_color}, Saved: {crop_img_path}")
+    print(f"[DETECTION] Frame {frame_no}, Plate: {plate_number}, Type: {vehicle_type}, Color: {vehicle_color}, Saved: {crop_img_path}")
+
+# Keep old function name for backward compatibility
+def log_violation(frame_no, plate_number, crop_img_path, vehicle_type="UNKNOWN", vehicle_color="UNKNOWN"):
+    """Alias for log_detection (backward compatibility)"""
+    log_detection(frame_no, plate_number, crop_img_path, vehicle_type, vehicle_color)
 
 # ============================================================================
 # EXISTING HELPER FUNCTIONS
@@ -388,6 +393,10 @@ def process_video(video_path,
     # Reset statistics
     global vehicle_stats
     vehicle_stats = VehicleStatistics()
+    
+    # Better cache: store by plate number (unique per vehicle)
+    vehicle_color_cache = {}  # Key: plate_number, Value: color
+    vehicle_detection_count = {}  # Track how many times we've seen each vehicle
 
     print(f"\n🚀 Starting enhanced video processing...")
     print(f"   Video: {video_path}")
@@ -436,13 +445,7 @@ def process_video(video_path,
                     if crop_vehicle.size == 0:
                         continue
 
-                    # ====== COLOR DETECTION ======
-                    if use_gemini and gemini_available:
-                        vehicle_color = detect_vehicle_color_gemini(crop_vehicle)
-                    else:
-                        vehicle_color = detect_vehicle_color_opencv(crop_vehicle)
-
-                    # Plate detection
+                    # ====== PLATE DETECTION FIRST (to get unique ID) ======
                     im_plate = letterbox(crop_vehicle, 640, stride=plate_stride, auto=True)[0]
                     im_plate = im_plate[:, :, ::-1].transpose(2, 0, 1).copy()
                     im_plate = torch.from_numpy(im_plate).to(device).float() / 255.0
@@ -466,11 +469,38 @@ def process_video(video_path,
                             else:
                                 plate_number = "UNKNOWN"
 
+                    # ====== SMART COLOR DETECTION (with better caching) ======
+                    # Only detect color once per unique vehicle (identified by plate OR first detection)
+                    vehicle_id = plate_number if plate_number != "UNKNOWN" else f"vehicle_{cx}_{cy}_{frame_no}"
+                    
+                    # Track detection count
+                    if vehicle_id not in vehicle_detection_count:
+                        vehicle_detection_count[vehicle_id] = 0
+                    vehicle_detection_count[vehicle_id] += 1
+                    
+                    # Detect color only on FIRST detection of this vehicle
+                    if vehicle_id not in vehicle_color_cache:
+                        # First time seeing this vehicle - detect color
+                        if use_gemini and gemini_available:
+                            vehicle_color = detect_vehicle_color_gemini(crop_vehicle)
+                        else:
+                            vehicle_color = detect_vehicle_color_opencv(crop_vehicle)
+                        
+                        # Cache the result
+                        vehicle_color_cache[vehicle_id] = vehicle_color
+                        print(f"  [NEW-VEHICLE] Detected color: {vehicle_color} for {vehicle_id}")
+                    else:
+                        # Use cached color for this vehicle
+                        vehicle_color = vehicle_color_cache[vehicle_id]
+                        if vehicle_detection_count[vehicle_id] % 10 == 0:  # Print every 10th detection
+                            print(f"  [COLOR-CACHE] Using cached color: {vehicle_color} (seen {vehicle_detection_count[vehicle_id]}x)")
+
                     # ====== RECORD STATISTICS ======
+                    # Record ALL detections, not just violations
                     is_violation = (plate_number != "UNKNOWN")
                     vehicle_stats.add_vehicle(vehicle_type, vehicle_color, is_violation)
 
-                    # Save violation if unique
+                    # Save violation if unique plate detected
                     if plate_number != "UNKNOWN" and plate_number not in logged_plates:
                         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                         proof = crop_vehicle.copy()
@@ -490,7 +520,7 @@ def process_video(video_path,
                         fname = f"frame{frame_no}_{plate_number}_{vehicle_type}_{vehicle_color}_{uuid.uuid4().hex[:6]}.jpg"
                         save_path = os.path.join(save_dir, fname)
                         cv2.imwrite(save_path, proof)
-                        log_violation(frame_no, plate_number, save_path, vehicle_type, vehicle_color)
+                        log_detection(frame_no, plate_number, save_path, vehicle_type, vehicle_color)  # CHANGED: log_detection instead of log_violation
                         logged_plates.add(plate_number)
                         tracked_vehicles.append((cx, cy))
 
@@ -509,6 +539,11 @@ def process_video(video_path,
                             "local_path": save_path,
                             "remote_url": remote_url
                         })
+                    
+                    # OPTIMIZATION: Skip color detection for already-logged vehicles
+                    elif plate_number in logged_plates:
+                        # Vehicle already processed, just visualize
+                        pass
 
                     # ====== ENHANCED: Visualize with type and color ======
                     color_bgr = (0, 0, 255) if plate_number != "UNKNOWN" else (0, 255, 0)
